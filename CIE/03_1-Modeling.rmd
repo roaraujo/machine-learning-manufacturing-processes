@@ -1,0 +1,651 @@
+---
+title: "Regressão Logística para avaliação do desempenho do pneu"
+author: |
+  | Rodrigo Marcel Araujo\thanks{Industrial Engineering Graduate Program, Federal University of Bahia, Salvador, Brazil.}
+  | Angelo Marcio Oliveira Santanna\thanks{Industrial Engineering Graduate Program, Federal University of Bahia, Salvador, Brazil.}
+date: "`r stringr::str_to_sentence(format(Sys.time(), '%B de %Y'))`"
+lang: pt-BR
+header-includes:
+  # - \usepackage[brazilian]{babel}
+  - \usepackage{float}
+  - \usepackage{amsmath}
+  - \usepackage{amsthm}
+  - \floatplacement{figure}{H}
+  - \usepackage{indentfirst}
+  - \setlength{\parindent}{4em}
+  - \setlength{\parskip}{1em}
+  - \usepackage{booktabs}
+  - \usepackage{dcolumn}
+  - \usepackage{bm}
+  - \usepackage{titling}
+  - \thanksmarkseries{arabic} % \thanks footnotes com numeros
+  - \usepackage[bottom]{footmisc} % corrige posição footnotes
+  - \usepackage{pdfpages}
+  - \usepackage{tocloft}
+  - \renewcommand{\cftsecleader}{\cftdotfill{\cftdotsep}}
+  - \usepackage{amssymb}
+  - \renewcommand\qedsymbol{$\blacksquare$}
+  - \usepackage{subfig}
+output: 
+  pdf_document: 
+    fig_caption: yes
+    number_sections: no
+    toc: true
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---
+
+\pagebreak
+
+```{=tex}
+\newcommand\invisiblesection[1]{%
+  \refstepcounter{section}%
+  \addcontentsline{toc}{section}{#1}%
+  \sectionmark{#1}}
+```
+<!-- \newcommand\invisiblesection[1]{% -->
+
+<!--   \refstepcounter{section}% -->
+
+<!--   \addcontentsline{toc}{section}{\protect\numberline{\thesection}#1}% -->
+
+<!--   \sectionmark{#1}} -->
+
+<!-- \newcommand\invisiblessection[1]{% -->
+
+<!--   \refstepcounter{subsection}% -->
+
+<!--   \addcontentsline{toc}{subsection}{\protect\numberline{\thesection}#1}% -->
+
+<!--   \sectionmark{#1}} -->
+
+```{r setup, include=FALSE}
+# paramentros padrao para os plots
+knitr::opts_chunk$set(fig.width = '\\textwidth',
+                      fig.align = 'center',
+                      out.width = "\\textwidth",
+                      warning = FALSE, echo = TRUE)
+
+
+library(robustbase)
+library(knitr)
+library(stargazer)
+library(gamlss)
+library(car)
+library(readxl)
+library(MASS)
+library(gridExtra)
+library(ggplot2)
+library(faraway)
+```
+
+```{r , include=FALSE}
+require(BatchGetSymbols)
+require(Amelia)
+require(reshape2)
+require(ggthemes) 
+require(plyr)
+```
+
+```{r , include=FALSE}
+
+suppressMessages(library(foreign))
+suppressMessages(library(dynlm))
+suppressMessages(library(car))
+suppressMessages(library(lmtest))
+suppressMessages(library(sandwich))
+suppressMessages(library(fpp2))
+suppressMessages(library(zoo))
+suppressMessages(library(forecast))
+library(quantmod)
+library(fpp2)
+library(GeneCycle)
+```
+
+```{r , include=FALSE}
+library(matrixStats)
+library(ggplot2)
+library(corrplot)
+
+library(cluster)    
+library(factoextra)
+library(gridExtra)
+
+library(dplyr)
+library(caret)
+library(lattice)
+
+library(GGally)
+library(ggcorrplot)
+library(scales)
+library(pROC)
+
+library(PMCMRplus) 
+library(dplyr)
+library(ggraph)
+library(igraph)
+
+library(PresenceAbsence)
+library(aricode)
+
+
+library(lpSolve)
+library(scatterplot3d)
+
+
+#library(plotly)
+#library("plot3D")
+#library(rgl)
+
+
+```
+
+**Funções auxiliares**
+
+```{r, include=FALSE}
+
+plotaroc <- function(rocobj, titulo = "Curva ROC"){
+  # Função que plota as curvas roc para os modelos ajustados 
+  b <- which.max(rocobj$sensitivities + rocobj$specificities)
+  best <- round(c(rocobj$thresholds[b],rocobj$specificities[b],rocobj$sensitivities[b]), 3)
+  
+  pROC::ggroc(rocobj, col = "red", alpha = 0.5, size = 0.5) + 
+    theme_gray() + 
+    ggtitle(titulo) + 
+    geom_abline(intercept = 1, slope=1, linetype = "dashed") +
+    labs(x="Especificidade", y = "Sensibilidade")  +
+    geom_point(data = tibble(Sensibilidade = best[2],
+                             Especificidade = best[3]),
+               mapping = aes(x=Sensibilidade, y=Especificidade),
+               col = "black") +
+    geom_text(mapping =  aes(x = best[2] - 0.15,
+                             y = best[3] - 0.05),
+              label = paste( best[1], "(", best[2], ",", best[3], ")")) +
+    geom_text(mapping = aes(x = 0.5,
+                            y = 0.01),
+              label = paste("AUC: ", round(rocobj$auc,3)))
+}
+
+tree_func <- function(final_model, 
+                      tree_num) {
+  
+  # get tree by index
+  tree <- randomForest::getTree(final_model, 
+                                k = tree_num, 
+                                labelVar = TRUE) %>%
+    tibble::rownames_to_column() %>%
+    # make leaf split points to NA, so the 0s won't get plotted
+    mutate(`split point` = ifelse(is.na(prediction), `split point`, NA))
+  
+  # prepare data frame for graph
+  graph_frame <- data.frame(from = rep(tree$rowname, 2),
+                            to = c(tree$`left daughter`, tree$`right daughter`))
+  
+  # convert to graph and delete the last node that we don't want to plot
+  graph <- graph_from_data_frame(graph_frame) %>%
+    delete_vertices("0")
+  
+  # set node labels
+  V(graph)$node_label <- gsub("_", " ", as.character(tree$`split var`))
+  V(graph)$leaf_label <- as.character(tree$prediction)
+  V(graph)$split <- as.character(round(tree$`split point`, digits = 2))
+  
+  # plot
+  plot <- ggraph(graph, 'dendrogram') + 
+    theme_bw() +
+    geom_edge_link() +
+    geom_node_point() +
+    geom_node_text(aes(label = node_label), na.rm = TRUE, repel = TRUE) +
+    geom_node_label(aes(label = split), vjust = 2, na.rm = TRUE, fill = "white") +
+    geom_node_label(aes(label = leaf_label, fill = leaf_label), na.rm = TRUE, 
+					repel = TRUE, colour = "white", fontface = "bold", show.legend = FALSE) +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_rect(fill = "white"),
+          panel.border = element_blank(),
+          axis.line = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          plot.title = element_text(size = 14))
+  
+  return(plot)
+}
+
+```
+
+
+<!-- # Read data -->
+
+<!-- ```{r} -->
+
+<!-- data = read.csv("C:/Users/Rodrigo Araujo/Documents/Mestrado - UFBA/Dissertação/mestrado-ufba/Artigo 2/data.csv", sep=';') -->
+
+<!-- head(data) %>% kable(caption="Dados.") -->
+
+<!-- data = data  %>% dplyr::select('GR', 'RFV','H1RFV','H2RFV','CONICITY', -->
+<!--        'H1LFV', 'PLY','LFV','RRO', 'CAPSPLICE', 'H1RRO')  -->
+
+<!-- data = data %>%filter(GR!="D")  -->
+
+<!-- data$GR = as.factor(data$GR) -->
+
+<!-- data$Y <- rep(ifelse(data$GR == 'A', 0, 1))#,28)  -->
+
+<!-- ``` -->
+
+<!-- # Separação base de Treino e Validação  -->
+<!-- ```{r} -->
+<!-- set.seed(5) #Garante a reproducividade do modelo -->
+<!-- trainIndex <- createDataPartition(data$Y, p=0.75, list=FALSE) -->
+<!-- train <- data[trainIndex,] -->
+<!-- test <- data[-trainIndex,] -->
+<!-- table(train$Y) -->
+<!-- prop.table(table(train$Y)) -->
+
+<!-- table(test$Y) -->
+<!-- prop.table(table(test$Y)) -->
+
+<!-- write.csv(train,file='C:/Users/Rodrigo Araujo/Documents/Mestrado - UFBA/Dissertação/mestrado-ufba/Artigo 2/train_2.csv',fileEncoding = "UTF-8") -->
+<!-- write.csv(test,file='C:/Users/Rodrigo Araujo/Documents/Mestrado - UFBA/Dissertação/mestrado-ufba/Artigo 2/test_2.csv',fileEncoding = "UTF-8") -->
+
+<!-- ``` -->
+
+
+
+
+# Tratamento dos dados
+
+```{r}
+
+train = read.csv("train_2.csv",sep = ",")
+test = read.csv("test_2.csv",sep = ",")
+
+
+X_train = train  %>% dplyr::select('RFV','H2RFV','CONICITY',
+       'PLY','LFV','RRO', 'CAPSPLICE', 'Y') 
+
+X_test = test  %>% dplyr::select('RFV','H2RFV','CONICITY',
+       'PLY','LFV','RRO', 'CAPSPLICE', 'Y') 
+
+y_train = train  %>% dplyr::select('Y')
+
+y_test = test  %>% dplyr::select('Y')
+
+#train$Y = as.factor(train$Y)
+#test$Y = as.factor(test$Y)
+
+```
+
+# Intervalo de Confiança
+
+```{r}
+
+X_train_1 = train  %>% dplyr::select('RFV','H2RFV','CONICITY',
+       'PLY','LFV','RRO', 'CAPSPLICE', 'Y') 
+
+A_train = train %>% filter(GR=='A')
+
+
+summary(X_train_1$RRO)
+summary(X_train_1$CONICITY)
+summary(X_train_1$H2RFV)
+
+
+t.test(X_train_1$RRO,
+       conf.level = 0.95)
+
+t.test(X_train_1$CONICITY,
+       conf.level = 0.95)
+
+t.test(X_train_1$H2RFV,
+       conf.level= 0.95)
+
+
+
+
+```
+
+
+
+
+# Regressão Logistica
+
+## Modelagem
+
+```{r}
+set.seed(31)
+
+modeloRL1 <- glm(y_train$Y ~ ., data = X_train, family=binomial(link = "logit"))
+#print(modeloRL1)
+summary(modeloRL1)
+
+step_RL <- step(modeloRL1, criteria ='BIC')#AIC
+summary(step_RL)
+step_RL$anova
+     
+modeloRL2 <- glm(y_train$Y ~ CONICITY + RRO + H2RFV, data = X_train, family=binomial(link = "logit"))
+summary(modeloRL2)
+
+predictRL2_train <- predict(modeloRL2, newdata = train, type='response')
+predictRL2_test <- predict(modeloRL2, newdata = test, type='response')
+
+
+#write.csv(predictRL2_train,file='C:/Users/Rodrigo Araujo/Documents/Mestrado - UFBA/Dissertação/mestrado-ufba/Artigo 2/predictRL2_train.csv',fileEncoding = "UTF-8") 
+
+
+#write.csv(predictRL2_test,file='C:/Users/Rodrigo Araujo/Documents/Mestrado - UFBA/Dissertação/mestrado-ufba/Artigo 2/predictRL2_test.csv',fileEncoding = "UTF-8") 
+
+#caret::confusionMatrix(predictRL1, train$Y)
+
+
+```
+
+### Resultados
+
+```{r}
+data_roc = data.frame(X_train$RFV,y_train$Y, modeloRL2$fitted.values)
+
+  
+names(data_roc)[3] <- "LR"
+#library(PresenceAbsence)
+
+
+auc.roc.plot(data_roc, opt.thresholds=TRUE, opt.methods=c("Default","Sens=Spec","MinROCdist"), main= " ")
+
+presence.absence.accuracy(data_roc,threshold=0.41,st.dev=TRUE)
+
+predict_train <- ifelse(predict(modeloRL2, newdata = X_train, type='response') < 0.41, 0, 1)
+predict_train_x <- data.frame(predict = predict_train, y_train = y_train$Y)
+
+predict_train_x$predict <- as.factor(predict_train_x$predict)
+predict_train_x$y_train <- as.factor(predict_train_x$y_train)
+
+confusionMatrix(predict_train_x$predict, predict_train_x$y_train)
+
+```
+
+### Intervalo de Confiança
+
+```{r}
+
+exp(cbind(OR=coef(modeloRL2), confint(modeloRL2)))
+
+```
+
+
+## Validacão
+
+```{r}
+
+
+predict_test <- ifelse(predict(modeloRL2, newdata = X_test, type='response') < 0.41, 0, 1)
+predict_test_x <- data.frame(predict = predict_test, y_test = y_test$Y)
+
+predict_test_x$predict <- as.factor(predict_test_x$predict)
+predict_test_x$y_test <- as.factor(predict_test_x$y_test)
+
+confusionMatrix(predict_test_x$predict, predict_test_x$y_test)
+
+
+
+```
+
+
+# Otimização Linear 
+
+## Modelo da Regressão Logística 
+
+$$ log(\frac{p}{1-p}) = \alpha + \beta_1H2RFV + \beta_2CONICITY + \beta_3RRO $$
+$$ log(\frac{0.41}{1-0.41}) = -47.0812 + 0.3555 H2RFV + 3.0103 CONICITY + 17.9134RRO $$
+
+$$ -0.3639653 = -47.0812 + 0.3555 H2RFV + 3.0103 CONICITY + 17.9134RRO $$
+
+$$ 46.71723 = 0.3555 H2RFV + 3.0103 CONICITY + 17.9134RRO $$
+
+## Otimização com método simplex
+
+```{r}
+
+conicity = 3.01
+rro = 17.91
+h2rfv = 0.356 
+d = 46.71723
+
+
+op <- function(x, y, z, conicity, rro, h2rfv){
+      x*conicity + y*rro + z*h2rfv
+}
+
+
+Yk = op(train$CONICITY, train$RRO, train$H2RFV, conicity, rro, h2rfv)
+
+train$Z = as.numeric(Yk)
+#train$W = c - train$H2RFV
+
+### Usar o intervalo interquartil
+
+train$Y2 <- rep(ifelse(train$Y == 0, "A", "BC"))#,28) 
+train$Y2 <- as.factor(train$Y2)
+table(train$Y, train$Y2)
+
+
+# Set coefficients of the objective function
+f.obj <- c(conicity, rro, h2rfv)
+ 
+# Set matrix corresponding to coefficients of constraints by rows
+# Do not consider the non-negative constraint; it is automatically assumed
+f.con <- matrix(c(conicity, rro, h2rfv,
+                  1, 0, 0, 
+                  0, 1, 0, 
+                  0, 0, 1, 
+                  1, 0, 0, 
+                  0, 1, 0, 
+                  0, 0, 1), nrow = 7, byrow = TRUE)
+
+# Set unequality signs
+f.dir <- c("<=",
+           "<=",
+            "<=",
+           "<=", 
+            ">=",
+            ">=",
+           ">=")
+
+# Set right hand side coefficients
+f.rhs <- c(d,
+           8.325,
+            0.7825,
+           21.25, 
+           6.775,
+           0.58,
+           7.75)
+
+
+# Final value (z)
+lp("max", f.obj, f.con, f.dir, f.rhs)
+
+# Variables final values
+lp("max", f.obj, f.con, f.dir, f.rhs)$solution
+
+# Sensitivities
+#lp("max", f.obj, f.con, f.dir, f.rhs, compute.sens=TRUE)$sens.coef.from
+#lp("max", f.obj, f.con, f.dir, f.rhs, compute.sens=TRUE)$sens.coef.to
+
+# Dual Values (first dual of the constraints and then dual of the variables)
+# Duals of the constraints and variables are mixed
+#lp("max", f.obj, f.con, f.dir, f.rhs, compute.sens=TRUE)$duals
+
+# Duals lower and upper limits
+#lp("max", f.obj, f.con, f.dir, f.rhs, compute.sens=TRUE)$duals.from
+#lp("max", f.obj, f.con, f.dir, f.rhs, compute.sens=TRUE)$duals.to
+
+
+```
+
+
+
+
+## Gráficos
+```{r}
+
+#scatterplot3d(train$CONICITY, train$RRO, train$H2RFV)
+
+colors <- c("#E69F00", "#56B4E9")
+colors <- colors[as.numeric(train$Y2)]
+
+
+s3d <- scatterplot3d(train$CONICITY, train$RRO, train$H2RFV, pch = 10,
+                     grid=TRUE, box=FALSE, color = colors)
+
+
+
+legend(s3d$xyz.convert(2.5, 3, 2.5), legend = levels(train$Y2),
+      col =  c("#E69F00", "#56B4E9"), pch = 10)
+
+
+
+
+```
+
+
+
+# Teste 
+
+
+```{r}
+#install.packages("devtools")
+#devtools::install_github("relund/gMOIP",build_vignettes = TRUE)
+
+
+loadPackages <- function(packages) {
+   newP <- packages[!(packages %in% installed.packages()[,"Package"])]
+   if(length(newP)) install.packages(newP, repos = "http://cran.rstudio.com/")
+   lapply(packages, library, character.only = TRUE)
+   invisible(NULL)
+}
+loadPackages("gMOIP")
+
+
+
+A <- matrix(c(conicity, rro, h2rfv,
+                  1, 0, 0, 
+                  0, 1, 0, 
+                  0, 0, 1, 
+                  -1, 0, 0, 
+                  0, -1, 0, 
+                  0, 0, -1), nrow = 7, byrow = TRUE)
+
+# Set right hand side coefficients
+b <- c(d,
+           8.325,
+            0.7825,
+           21.25, 
+           -6.775,
+           -0.58,
+           -7.75)
+
+
+
+
+
+obj <- c(conicity, rro, h2rfv)
+
+
+
+
+#loadView(v = view, close = F, zoom = 0.75)
+#plotPolytope(A, b, plotOptimum = TRUE, obj = obj)
+
+
+
+
+
+
+
+```
+
+
+
+
+# Teste kruskal
+
+## RRO
+
+```{r}
+h = kruskal.test(RRO ~ y_train$Y, data=X_train) 
+h
+
+```
+
+## CONICITY
+
+```{r}
+h = kruskal.test(CONICITY ~ y_train$Y, data=X_train) 
+h
+```
+
+## RFV
+
+```{r}
+h = kruskal.test(RFV ~ y_train$Y, data=X_train) 
+h
+```
+
+## H2RFV
+
+```{r}
+h = kruskal.test(H2RFV ~ y_train$Y, data=X_train) 
+h
+```
+
+## PLY
+
+```{r}
+h = kruskal.test(PLY ~ y_train$Y, data=X_train) 
+h 
+```
+
+## LFV
+
+```{r}
+h = kruskal.test(LFV ~ y_train$Y, data=X_train) 
+h
+```
+
+## CAPSPLICE
+
+```{r}
+h = kruskal.test(CAPSPLICE ~ y_train$Y, data=X_train) 
+h
+```
+
+
+
+## Regressão linear
+```{r}
+
+X_train_0 = X_train %>% filter(Y==0) 
+ajuste=lm(H2RFV ~ RFV, data=X_train)
+ajuste
+
+shapiro.test(ajuste$residuals)
+
+library(ggplot2)
+ggplot(data=X_train_0,aes(y=H2RFV,x=RFV))+geom_point()+geom_smooth(method="lm")
+
+plot(resid(ajuste) ~ predict(ajuste),pch=16) # Resíduos vs. Y esperado
+abline(0,0,col="red")
+par(mfrow=c(2,2))
+plot(ajuste)
+
+```
+
+
+
+
+                
